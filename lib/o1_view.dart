@@ -8,60 +8,6 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-class AudioRecording {
-  FlutterSoundRecorder? _recorder;
-  bool isRecording = false;
-
-  Future<void> startRecording() async {
-    Directory directory = await getApplicationDocumentsDirectory();
-    String path = '${directory.path}/tempvoice.wav';
-
-    _recorder = FlutterSoundRecorder();
-
-    try {
-      await _recorder!.openRecorder();
-      await _recorder!.startRecorder(
-        toFile: path,
-        codec: Codec.pcm16WAV,
-        sampleRate: 16000,
-        numChannels: 1,
-      );
-      isRecording = true;
-    } catch (e) {
-      await _recorder!.closeRecorder();
-      _recorder = null;
-    }
-  }
-
-  Future<String> getDocumentsDirectory() async {
-    Directory directory = await getApplicationDocumentsDirectory();
-    return directory.path;
-  }
-
-  Future<Uint8List?> stopRecording() async {
-    if (isRecording && _recorder != null) {
-      try {
-        String? path = await _recorder!.stopRecorder();
-        _recorder!.closeRecorder();
-        _recorder = null;
-        isRecording = false;
-
-        if (path != null) {
-          File audioFile = File(path);
-          Uint8List data = await audioFile.readAsBytes();
-          await audioFile.delete();
-          return data;
-        }
-      } catch (e) {
-        return null;
-      }
-    } else {
-      return null;
-    }
-    return null;
-  }
-}
-
 class O1ViewController extends StatefulWidget {
   const O1ViewController({super.key});
 
@@ -107,7 +53,8 @@ class O1ViewControllerState extends State<O1ViewController> {
           ),
           const Text('Hold to start once connected.'),
           GestureDetector(
-            onLongPress: () => buttonPress(),
+            onLongPressStart: (details) => buttonPress(),
+            onLongPressEnd: (details) => buttonUp(),
             child: const Icon(Icons.circle, size: 100, color: Colors.yellow),
           ),
           Row(
@@ -135,23 +82,26 @@ class O1ViewControllerState extends State<O1ViewController> {
   void checkRecordingPerms() async {
     var status = await Permission.microphone.status;
     if (!status.isGranted) {
+      debugPrint('Requesting microphone permission');
       await Permission.microphone.request();
       status = await Permission.microphone.status;
     }
+    debugPrint('Microphone permission: ${status.isGranted}');
     recordingPermission = status.isGranted;
   }
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    address = 'Your saved address';
-    if (address != null) {
-      establishConnection();
-    } else {
-      setAddress();
-    }
-    checkRecordingPerms();
-  }
+  // @override
+  // void didChangeDependencies() {
+  //   super.didChangeDependencies();
+  //   address = null;
+  //   debugPrint('Address: $address');
+  //   if (address != null) {
+  //     establishConnection();
+  //   } else {
+  //     //setAddress();
+  //   }
+  //   checkRecordingPerms();
+  // }
 
   void setAddress() async {
     showDialog(
@@ -162,7 +112,7 @@ class O1ViewControllerState extends State<O1ViewController> {
           content: TextField(
             controller: addressController,
             decoration: const InputDecoration(
-              hintText: 'Enter Address Here',
+              hintText: 'Enter IP Address Like 127.0.0.1:10001',
             ),
           ),
           actions: [
@@ -179,6 +129,7 @@ class O1ViewControllerState extends State<O1ViewController> {
                   address = addressController.text;
                 });
                 establishConnection();
+                checkRecordingPerms();
                 Navigator.of(context).pop();
               },
             ),
@@ -210,31 +161,69 @@ class O1ViewControllerState extends State<O1ViewController> {
       audioRecordingInstance = AudioRecording();
       await audioRecordingInstance!.startRecording();
       setState(() {});
-    } else {}
+    } else {
+      if (!isConnected) {
+        debugPrint('Not connected');
+      }
+      if (!recordingPermission) {
+        debugPrint('No recording permission');
+      }
+    }
+  }
+
+  void buttonUp() async {
+    if (isConnected && recordingPermission) {
+      Uint8List? audio = await audioRecordingInstance!.stopRecording();
+
+      if (audio == null) {
+        debugPrint('No audio data recorded');
+        return;
+      } else {
+        audioData = (await audioRecordingInstance!.stopRecording())!;
+        sendAudio(audioData);
+      }
+    } else {
+      debugPrint('Nothing to send... Not connected or no recording permission');
+    }
   }
 
   Future<void> establishConnection() async {
+    debugPrint('Establishing connection to $address');
     if (address != null) {
       try {
         connection = await createPeerConnection({
           'iceServers': [
-            {'url': 'stun:stun.l.google.com:19302'}
+            {
+              'urls': [
+                'stun:stun1.l.google.com:19302',
+                'stun:stun2.l.google.com:19302'
+              ]
+            }
           ]
         });
+        debugPrint('Created connection!');
+        debugPrint(
+            'Connection state: ${await connection!.getConnectionState()}');
         dataChannel =
             await connection!.createDataChannel('data', RTCDataChannelInit());
+        debugPrint('Created data channel');
+        dataChannel!.onDataChannelState = (state) {
+          debugPrint('Data channel state: $state');
+        };
         connection!.onDataChannel = (channel) {
           channel.onMessage = (message) {
             setState(() {
+              debugPrint('Data channel message: ${message.text}');
               terminalFeedController.text += '\n>> ${message.text}';
             });
           };
         };
         setState(() {
           isConnected = true;
+          debugPrint('Connected to $address');
         });
       } catch (e) {
-        print('Error connecting to WebSocket: $e');
+        debugPrint('Error connecting to WebSocket: $e');
       }
     } else {
       setAddress();
@@ -280,8 +269,9 @@ class O1ViewControllerState extends State<O1ViewController> {
   }
 
   void sendAudio(Uint8List audio) async {
+    debugPrint('Sending audio');
     if (isConnected) {
-      dataChannel?.send(RTCDataChannelMessage(
+      await dataChannel?.send(RTCDataChannelMessage(
         jsonEncode({
           'role': 'user',
           'type': 'audio',
@@ -289,8 +279,10 @@ class O1ViewControllerState extends State<O1ViewController> {
           'start': true,
         }),
       ));
-      dataChannel?.send(RTCDataChannelMessage.fromBinary(audio));
-      dataChannel?.send(RTCDataChannelMessage(
+      debugPrint('Sent audio start');
+      await dataChannel?.send(RTCDataChannelMessage.fromBinary(audio));
+      debugPrint('Sent audio data');
+      await dataChannel?.send(RTCDataChannelMessage(
         jsonEncode({
           'role': 'user',
           'type': 'audio',
@@ -298,8 +290,69 @@ class O1ViewControllerState extends State<O1ViewController> {
           'end': true,
         }),
       ));
+      debugPrint('Sent audio end');
     } else {
-      print('Not connected!');
+      debugPrint('Not connected');
     }
+  }
+}
+
+class AudioRecording {
+  FlutterSoundRecorder? _recorder;
+  bool isRecording = false;
+
+  Future<void> startRecording() async {
+    Directory directory = await getApplicationDocumentsDirectory();
+    String path = '${directory.path}/tempvoice.wav';
+
+    debugPrint('Recording to: $path');
+
+    _recorder = FlutterSoundRecorder();
+
+    try {
+      await _recorder!.openRecorder();
+      await _recorder!.startRecorder(
+        toFile: path,
+        codec: Codec.pcm16WAV,
+        sampleRate: 16000,
+        numChannels: 1,
+      );
+      isRecording = true;
+      debugPrint('Started recording');
+    } catch (e) {
+      debugPrint('Error starting recording: $e');
+      await _recorder!.closeRecorder();
+      _recorder = null;
+    }
+  }
+
+  Future<String> getDocumentsDirectory() async {
+    Directory directory = await getApplicationDocumentsDirectory();
+    return directory.path;
+  }
+
+  Future<Uint8List?> stopRecording() async {
+    if (isRecording && _recorder != null) {
+      try {
+        String? path = await _recorder!.stopRecorder();
+        debugPrint('recording stopped: $path');
+        _recorder!.closeRecorder();
+        _recorder = null;
+        isRecording = false;
+
+        if (path != null) {
+          File audioFile = File(path);
+          Uint8List data = await audioFile.readAsBytes();
+          debugPrint('Audio data length: ${data.length}');
+          await audioFile.delete();
+          return data;
+        }
+      } catch (e) {
+        return null;
+      }
+    } else {
+      return null;
+    }
+    return null;
   }
 }
